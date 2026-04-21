@@ -18,11 +18,14 @@ export default function ScanningFlow() {
   const [capturedImages, setCapturedImages] = useState<string[]>([]);
   const [currentStep, setCurrentStep] = useState(0);
   const [quality, setQuality] = useState<Quality>("moving");
+  const [notifyStatus, setNotifyStatus] = useState<"idle" | "sending" | "success" | "error">("idle");
 
   // Off-screen canvas + previous frame pixel buffer for motion diff
   const sampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const prevPixelsRef = useRef<Uint8ClampedArray | null>(null);
   const rafRef = useRef<number | null>(null);
+  const scanIdRef = useRef(`scan_${Date.now()}`);
+  const hasTriggeredNotifyRef = useRef(false);
 
   const VIEWS = [
     { label: "Front View", instruction: "Smile and look straight at the camera." },
@@ -101,6 +104,41 @@ export default function ScanningFlow() {
     };
   }, [currentStep]);
 
+  // Trigger notification once when scan is fully completed
+  useEffect(() => {
+    if (currentStep < 5 || hasTriggeredNotifyRef.current) return;
+
+    async function triggerNotification() {
+      try {
+        hasTriggeredNotifyRef.current = true;
+        setNotifyStatus("sending");
+
+        const response = await fetch("/api/notify", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            scanId: scanIdRef.current,
+            status: "completed",
+          }),
+        });
+
+        if (!response.ok) {
+          setNotifyStatus("error");
+          return;
+        }
+
+        setNotifyStatus("success");
+      } catch (error) {
+        console.error("Failed to trigger notification", error);
+        setNotifyStatus("error");
+      }
+    }
+
+    triggerNotification();
+  }, [currentStep]);
+
   const handleCapture = useCallback(() => {
     // Boilerplate logic for capturing a frame from the video feed
     const video = videoRef.current;
@@ -143,18 +181,18 @@ export default function ScanningFlow() {
               className="absolute inset-0 pointer-events-none"
               style={{
                 background:
-                  "radial-gradient(ellipse 54% 34% at 50% 48%, transparent 58%, rgba(0,0,0,0.65) 100%)",
+                  "radial-gradient(circle 36% at 50% 48%, transparent 60%, rgba(0,0,0,0.65) 100%)",
               }}
             />
 
-            {/* Mouth guide oval — color driven by stability */}
+            {/* Mouth guide circle — color driven by stability */}
             <div
-              className={`absolute rounded-[50%] border-2 pointer-events-none transition-colors duration-300 ${
+              className={`absolute rounded-full border-2 pointer-events-none transition-colors duration-300 ${
                 quality === "stable" ? "border-green-400" : "border-yellow-400"
               }`}
               style={{
-                width: "54%",
-                height: "34%",
+                width: "72%",
+                height: "72%",
                 top: "48%",
                 left: "50%",
                 transform: "translate(-50%, -50%)",
@@ -182,6 +220,10 @@ export default function ScanningFlow() {
             <CheckCircle2 size={48} className="text-green-500 mx-auto mb-4" />
             <h2 className="text-xl font-bold">Scan Complete</h2>
             <p className="text-zinc-400 mt-2">Uploading results...</p>
+            <p className="text-xs mt-2 text-zinc-500">Scan ID: {scanIdRef.current}</p>
+            {notifyStatus === "sending" && <p className="text-xs mt-1 text-zinc-400">Triggering clinic notification...</p>}
+            {notifyStatus === "success" && <p className="text-xs mt-1 text-green-400">Clinic notification sent.</p>}
+            {notifyStatus === "error" && <p className="text-xs mt-1 text-red-400">Notification failed. Check API/server logs.</p>}
           </div>
         )}
       </div>
