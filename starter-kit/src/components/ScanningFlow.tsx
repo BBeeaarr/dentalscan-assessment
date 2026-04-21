@@ -12,6 +12,14 @@ const SAMPLE_H = 60;
 
 type Quality = "moving" | "stable";
 
+type Message = {
+  id: string;
+  threadId: string;
+  content: string;
+  sender: "patient" | "dentist";
+  createdAt: string;
+};
+
 export default function ScanningFlow() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [camReady, setCamReady] = useState(false);
@@ -19,13 +27,21 @@ export default function ScanningFlow() {
   const [currentStep, setCurrentStep] = useState(0);
   const [quality, setQuality] = useState<Quality>("moving");
   const [notifyStatus, setNotifyStatus] = useState<"idle" | "sending" | "success" | "error">("idle");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [messageBody, setMessageBody] = useState("");
+  const [loadingMessages, setLoadingMessages] = useState(false);
+  const [sendingMessage, setSendingMessage] = useState(false);
+  const [messageError, setMessageError] = useState<string | null>(null);
+  const [messageStatus, setMessageStatus] = useState<"idle" | "sending" | "sent">("idle");
 
   // Off-screen canvas + previous frame pixel buffer for motion diff
   const sampleCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const prevPixelsRef = useRef<Uint8ClampedArray | null>(null);
   const rafRef = useRef<number | null>(null);
   const scanIdRef = useRef(`scan_${Date.now()}`);
+  const threadIdRef = useRef(`thread_${Date.now()}`);
   const hasTriggeredNotifyRef = useRef(false);
+  const hasLoadedMessagesRef = useRef(false);
 
   const VIEWS = [
     { label: "Front View", instruction: "Smile and look straight at the camera." },
@@ -139,6 +155,76 @@ export default function ScanningFlow() {
     triggerNotification();
   }, [currentStep]);
 
+  const loadMessages = useCallback(async () => {
+    setLoadingMessages(true);
+    setMessageError(null);
+
+    try {
+      const response = await fetch(`/api/messaging?threadId=${encodeURIComponent(threadIdRef.current)}`);
+      const data = await response.json();
+
+      if (!response.ok || !data.ok) {
+        setMessageError(data?.error ?? "Failed to load message history.");
+        return;
+      }
+
+      setMessages((data.messages ?? []) as Message[]);
+    } catch (error) {
+      console.error("Failed to load messages", error);
+      setMessageError("Failed to load message history.");
+    } finally {
+      setLoadingMessages(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (currentStep < 5 || hasLoadedMessagesRef.current) return;
+    hasLoadedMessagesRef.current = true;
+    loadMessages();
+  }, [currentStep, loadMessages]);
+
+  const sendMessage = useCallback(async () => {
+    const safeContent = messageBody.trim();
+    if (!safeContent) {
+      setMessageError("Message cannot be empty.");
+      return;
+    }
+
+    setSendingMessage(true);
+    setMessageStatus("sending");
+    setMessageError(null);
+
+    try {
+      const response = await fetch("/api/messaging", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          threadId: threadIdRef.current,
+          content: safeContent,
+          sender: "patient",
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok || !data.ok) {
+        setMessageError(data?.error ?? "Failed to send message.");
+        return;
+      }
+
+      setMessageBody("");
+      setMessageStatus("sent");
+      await loadMessages();
+    } catch (error) {
+      console.error("Failed to send message", error);
+      setMessageError("Failed to send message.");
+      setMessageStatus("idle");
+    } finally {
+      setSendingMessage(false);
+    }
+  }, [loadMessages, messageBody]);
+
   const handleCapture = useCallback(() => {
     // Boilerplate logic for capturing a frame from the video feed
     const video = videoRef.current;
@@ -216,14 +302,72 @@ export default function ScanningFlow() {
             </div>
           </>
         ) : (
-          <div className="text-center p-10">
+          <div className="w-full h-full overflow-y-auto p-6 sm:p-8">
             <CheckCircle2 size={48} className="text-green-500 mx-auto mb-4" />
-            <h2 className="text-xl font-bold">Scan Complete</h2>
-            <p className="text-zinc-400 mt-2">Uploading results...</p>
-            <p className="text-xs mt-2 text-zinc-500">Scan ID: {scanIdRef.current}</p>
-            {notifyStatus === "sending" && <p className="text-xs mt-1 text-zinc-400">Triggering clinic notification...</p>}
-            {notifyStatus === "success" && <p className="text-xs mt-1 text-green-400">Clinic notification sent.</p>}
-            {notifyStatus === "error" && <p className="text-xs mt-1 text-red-400">Notification failed. Check API/server logs.</p>}
+            <h2 className="text-xl font-bold text-center">Scan Complete</h2>
+            <p className="text-zinc-400 mt-2 text-center">Uploading results...</p>
+            <p className="text-xs mt-2 text-zinc-500 text-center">Scan ID: {scanIdRef.current}</p>
+            <p className="text-xs mt-1 text-zinc-500 text-center">Thread ID: {threadIdRef.current}</p>
+            {notifyStatus === "sending" && <p className="text-xs mt-1 text-zinc-400 text-center">Triggering clinic notification...</p>}
+            {notifyStatus === "success" && <p className="text-xs mt-1 text-green-400 text-center">Clinic notification sent.</p>}
+            {notifyStatus === "error" && <p className="text-xs mt-1 text-red-400 text-center">Notification failed. Check API/server logs.</p>}
+
+            <div className="mt-5 rounded-xl border border-zinc-800 bg-zinc-900/70 p-3">
+              <h3 className="text-sm font-semibold">Message your clinic</h3>
+
+              <div className="mt-3 h-44 overflow-y-auto rounded-lg bg-zinc-950 border border-zinc-800 p-3 space-y-2">
+                {loadingMessages && <p className="text-sm text-zinc-400">Loading messages...</p>}
+                {!loadingMessages && messages.length === 0 && (
+                  <p className="text-sm text-zinc-500">No messages yet. Send the first update to your clinic.</p>
+                )}
+                {!loadingMessages &&
+                  messages.map((message) => (
+                    <div
+                      key={message.id}
+                      className={`max-w-[88%] rounded-md px-3 py-2 text-sm ${
+                        message.sender === "patient"
+                          ? "ml-auto bg-blue-600/30 border border-blue-500/40"
+                          : "mr-auto bg-zinc-800 border border-zinc-700"
+                      }`}
+                    >
+                      <p>{message.content}</p>
+                      <p className="text-[10px] text-zinc-400 mt-1">{new Date(message.createdAt).toLocaleString()}</p>
+                    </div>
+                  ))}
+              </div>
+
+              <form
+                className="mt-3 flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  sendMessage();
+                }}
+              >
+                <input
+                  value={messageBody}
+                  onChange={(e) => {
+                    setMessageBody(e.target.value);
+                    if (messageStatus === "sent") {
+                      setMessageStatus("idle");
+                    }
+                  }}
+                  placeholder="Write a message to your clinic..."
+                  className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm outline-none focus:border-blue-500"
+                />
+                <button
+                  type="submit"
+                  disabled={sendingMessage}
+                  className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium disabled:opacity-60"
+                >
+                  {sendingMessage ? "Sending..." : "Send"}
+                </button>
+              </form>
+
+              {messageStatus === "sending" && <p className="text-xs text-zinc-400 mt-2">Sending message to /api/messaging...</p>}
+              {messageStatus === "sent" && <p className="text-xs text-green-400 mt-2">Message sent.</p>}
+
+              {messageError && <p className="text-xs text-red-400 mt-2">{messageError}</p>}
+            </div>
           </div>
         )}
       </div>
